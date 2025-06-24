@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Gesture Lab (Dual Hands + Distance Line + Gauge)</title>
+  <style>
+    body { text-align:center; font-family:Arial; background:#eef2f7; color:#333; margin:1em; }
+    #container { position:relative; display:inline-block; }
+    video, canvas { border-radius:12px; box-shadow:0 4px 10px rgba(0,0,0,0.15); transform:scaleX(-1); }
+    #canvas { position:absolute; top:0; left:0; pointer-events:none; }
+    #info { margin-top:0.5em; font-size:1.1rem; white-space:pre-line; min-height:120px; color:#222; text-align:left; display:inline-block; }
+    .bar-container { width:20px; height:480px; background:#ddd; display:inline-block; vertical-align:top; margin-left:10px; border-radius:10px; overflow:hidden; }
+    .bar-fill { width:100%; background:#0077cc; height:0%; transition:height 0.1s ease-out; }
+  </style>
+</head>
+<body>
+  <h1>Gesture Lab</h1>
+  <p>Tracking two hands: Distance line, openness bar, distance values & gestures</p>
+
+  <div id="container">
+    <video id="video" width="640" height="480" autoplay muted playsinline></video>
+    <canvas id="canvas" width="640" height="480"></canvas>
+  </div>
+
+  <div style="display:inline-block; vertical-align:top; text-align:left;">
+    <div id="info"></div>
+    <div class="bar-container"><div id="bar1" class="bar-fill"></div></div>
+    <div class="bar-container"><div id="bar2" class="bar-fill"></div></div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js"></script>
+  <script>
+    const video = document.getElementById('video');
+    const canvas = document.getElementById('canvas');
+    const ctx = canvas.getContext('2d');
+    const info = document.getElementById('info');
+    const bar1 = document.getElementById('bar1');
+    const bar2 = document.getElementById('bar2');
+
+    const PIXELS_TO_CM = 24;
+
+    function dist(a, b){ return Math.hypot(a.x - b.x, a.y - b.y); }
+
+    function toPxCm(normDist){
+      const px = normDist * canvas.width;
+      return { px, cm: (px/PIXELS_TO_CM).toFixed(2) };
+    }
+
+    function openness(landmarks){
+      const wrist = landmarks[0], tips = [4,8,12,16,20];
+      let sum=0;
+      tips.forEach(t=> sum+=dist(landmarks[t], wrist));
+      let avg = sum / tips.length;
+      let pct = Math.min(100, Math.max(0, (avg/0.4)*100));
+      return pct.toFixed(1);
+    }
+
+    function detectGesture(landmarks){
+      const wrist = landmarks[0];
+      const t4=landmarks[4], t8=landmarks[8];
+
+      let thumbUp = (t4.y < wrist.y) &&
+        [8,12,16,20].every(i => landmarks[i].y > landmarks[i-2].y);
+      let peace = [8,12].every((i,idx)=>
+        landmarks[i].y < landmarks[i-2].y) &&
+        [4,16,20].every(i=> landmarks[i].y > landmarks[i-2].y);
+      let ok = dist(t4, t8) < 0.05;
+      let fist = [4,8,12,16,20].every(i=> dist(landmarks[i], wrist) < 0.1);
+
+      if (thumbUp) return "👍 Thumbs Up";
+      if (peace) return "✌️ Peace";
+      if (ok) return "👌 OK";
+      if (fist) return "✊ Fist";
+      return openness(landmarks) > 70 ? "🖐️ Open" : openness(landmarks) < 30 ? "✋ Closed" : "✋ Semi-open";
+    }
+
+    function onResults(r){
+      ctx.clearRect(0,0,canvas.width,canvas.height);
+      info.textContent = "";
+      [bar1, bar2].forEach(bar=> bar.style.height = "0%");
+
+      if (r.multiHandLandmarks && r.multiHandLandmarks.length) {
+        r.multiHandLandmarks.forEach((lmSet, idx) => {
+          // Draw landmarks
+          window.drawConnectors(ctx, lmSet, window.HAND_CONNECTIONS, {color:'#0f0', lineWidth:4});
+          window.drawLandmarks(ctx, lmSet, {color:'#f00', lineWidth:2});
+
+          const d = toPxCm(dist(lmSet[4], lmSet[8]));
+          const op = openness(lmSet);
+          const gesture = detectGesture(lmSet);
+          const handLabel = r.multiHandedness?.[idx]?.label || `Hand ${idx+1}`;
+
+          info.textContent += 
+            `${handLabel}:\n` +
+            `  Distance: ${d.px.toFixed(1)} px / ${d.cm} cm\n` +
+            `  Openness: ${op}%\n` +
+            `  Gesture: ${gesture}\n\n`;
+
+          // Draw distance line
+          const x1 = lmSet[4].x * canvas.width, y1 = lmSet[4].y * canvas.height;
+          const x2 = lmSet[8].x * canvas.width, y2 = lmSet[8].y * canvas.height;
+          ctx.beginPath();
+          ctx.strokeStyle = "#00f"; ctx.lineWidth = 3;
+          ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke();
+          ctx.beginPath();
+          ctx.fillStyle = "#00f";
+          ctx.arc(x1, y1, 6, 0, 2*Math.PI); ctx.fill();
+          ctx.beginPath();
+          ctx.arc(x2, y2, 6, 0, 2*Math.PI); ctx.fill();
+
+          // Update openness bar
+          const barElem = idx===0?bar1:bar2;
+          barElem.style.height = op + "%";
+        });
+      } else {
+        info.textContent = "No hands detected.";
+      }
+    }
+
+    const hands = new Hands({locateFile: f => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${f}`});
+    hands.setOptions({ maxNumHands:2, modelComplexity:1, minDetectionConfidence:0.7, minTrackingConfidence:0.7 });
+    hands.onResults(onResults);
+
+    const cam = new Camera(video, {
+      onFrame: async()=> await hands.send({image:video}),
+      width:640, height:480
+    });
+    cam.start();
+  </script>
+</body>
+</html>
